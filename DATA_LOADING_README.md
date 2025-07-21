@@ -149,3 +149,14 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 - Use environment-specific PATs with minimal required permissions
 - Consider using Milvus cloud for production deployments
 - Monitor API usage and costs for OpenAI embeddings 
+
+
+
+Strategy by_file: 5 chunks
+Strategy by_function: 15 chunks  
+Strategy by_class: 3 chunks
+Strategy by_line_range: 25 chunks
+Strategy by_semantic_block: 12 chunks
+Strategy by_import_block: 5 chunks
+Strategy by_docstring: 8 chunks
+Total chunks created: 73
