@@ -402,31 +402,30 @@ class GitHubRepoLoader:
         logger.info(f"Found {len(python_files)} Python files")
         return python_files
 
-class SparseEmbeddingGenerator:
-    """Generates sparse embeddings using OpenAI's API."""
+class EmbeddingGenerator:
+    """Generates dense embeddings using OpenAI's API."""
     
     def __init__(self, openai_api_key: str):
         self.client = openai.OpenAI(api_key=openai_api_key)
     
-    def generate_sparse_embedding(self, text: str) -> Dict[str, Any]:
-        """Generate sparse embedding for the given text using OpenAI."""
+    def generate_dense_embedding(self, text: str) -> Dict[str, Any]:
+        """Generate dense embedding for the given text using OpenAI."""
         try:
             response = self.client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text,
-                encoding_format="sparse"
+                model="text-embedding-3-large",
+                input=text
             )
             
-            # Extract sparse embedding data
-            sparse_data = response.data[0].embedding
+            # Extract dense embedding data
+            dense_data = response.data[0].embedding
             
             return {
-                'sparse_embedding': sparse_data,
+                'dense_embedding': dense_data,
                 'text': text
             }
             
         except Exception as e:
-            logger.error(f"Error generating sparse embedding: {e}")
+            logger.error(f"Error generating dense embedding: {e}")
             return None
 
 class MilvusManager:
@@ -452,8 +451,8 @@ class MilvusManager:
             logger.error(f"Error connecting to Milvus: {e}")
             return False
     
-    def create_sparse_collection(self) -> bool:
-        """Create a sparse vector collection for code chunks."""
+    def create_collection(self) -> bool:
+        """Create a collection for code chunks with dense vectors."""
         try:
             # Drop existing collection if it exists
             if utility.has_collection(self.collection_name):
@@ -462,7 +461,7 @@ class MilvusManager:
                 import time
                 time.sleep(1)
             
-            # Define collection schema with sparse vector
+            # Define collection schema with dense vectors
             fields = [
                 FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
                 FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=256),
@@ -470,32 +469,32 @@ class MilvusManager:
                 FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=50),
                 FieldSchema(name="chunk_name", dtype=DataType.VARCHAR, max_length=256),
                 FieldSchema(name="source_code", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
+                FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=3072),
                 FieldSchema(name="metadata", dtype=DataType.JSON)
             ]
             
-            schema = CollectionSchema(fields, description="Code chunks with sparse embeddings")
+            schema = CollectionSchema(fields, description="Code chunks with dense embeddings")
             
             # Create collection
             collection = Collection(self.collection_name, schema)
             
-            # Create index for sparse vector field
-            index_params = {
-                "metric_type": "IP",  # Inner Product for sparse vectors
-                "index_type": "SPARSE_INVERTED_INDEX",
-                "params": {"drop_ratio_build": 0.2}
+            # Create index for dense vector field
+            dense_index_params = {
+                "metric_type": "COSINE",  # Cosine similarity for dense vectors
+                "index_type": "IVF_FLAT",
+                "params": {"nlist": 128}
             }
-            collection.create_index("sparse_vector", index_params)
+            collection.create_index("dense_vector", dense_index_params)
             
-            logger.info(f"Successfully created sparse collection: {self.collection_name}")
+            logger.info(f"Successfully created collection with dense vector index: {self.collection_name}")
             return True
             
         except Exception as e:
-            logger.error(f"Error creating sparse collection: {e}")
+            logger.error(f"Error creating collection: {e}")
             return False
     
-    def upsert_sparse_data(self, data: List[Dict[str, Any]]) -> bool:
-        """Upsert data with sparse embeddings into the collection."""
+    def upsert_data(self, data: List[Dict[str, Any]]) -> bool:
+        """Upsert data with dense embeddings into the collection."""
         try:
             collection = Collection(self.collection_name)
             collection.load()
@@ -506,7 +505,7 @@ class MilvusManager:
             chunk_types = [chunk['chunk_type'] for chunk in data]
             chunk_names = [chunk['name'] for chunk in data]
             source_codes = [chunk['source_code'] for chunk in data]
-            sparse_vectors = [chunk['sparse_embedding'] for chunk in data]
+            dense_vectors = [chunk['dense_embedding'] for chunk in data]
             metadatas = [json.dumps(chunk.get('metadata', {})) for chunk in data]
             
             # Insert data
@@ -516,16 +515,16 @@ class MilvusManager:
                 chunk_types,
                 chunk_names,
                 source_codes,
-                sparse_vectors,
+                dense_vectors,
                 metadatas
             ])
             collection.flush()
             
-            logger.info(f"Successfully upserted {len(data)} sparse chunks")
+            logger.info(f"Successfully upserted {len(data)} chunks with dense embeddings")
             return True
             
         except Exception as e:
-            logger.error(f"Error upserting sparse data: {e}")
+            logger.error(f"Error upserting data: {e}")
             return False
 
 def main():
@@ -607,14 +606,14 @@ def main():
         logger.info(f"Total chunks created: {len(all_chunks)}")
         logger.info(f"Strategy breakdown: {strategy_stats}")
         
-        # Step 4: Generate sparse embeddings
-        logger.info("Step 4: Generating sparse embeddings")
-        embedding_generator = SparseEmbeddingGenerator(openai_api_key)
+        # Step 4: Generate dense embeddings
+        logger.info("Step 4: Generating dense embeddings")
+        embedding_generator = EmbeddingGenerator(openai_api_key)
         
         chunks_with_embeddings = []
         for chunk in all_chunks:
-            # Generate sparse embedding for the source code
-            embedding = embedding_generator.generate_sparse_embedding(chunk.source_code)
+            # Generate dense embeddings for the source code
+            embedding = embedding_generator.generate_dense_embedding(chunk.source_code)
             if embedding:
                 chunk_dict = {
                     'chunk_id': chunk.chunk_id,
@@ -622,12 +621,12 @@ def main():
                     'name': chunk.name,
                     'source_code': chunk.source_code,
                     'file_path': chunk.file_path,
-                    'sparse_embedding': embedding['sparse_embedding'],
+                    'dense_embedding': embedding['dense_embedding'],
                     'metadata': chunk.metadata or {}
                 }
                 chunks_with_embeddings.append(chunk_dict)
         
-        logger.info(f"Generated sparse embeddings for {len(chunks_with_embeddings)} chunks")
+        logger.info(f"Generated dense embeddings for {len(chunks_with_embeddings)} chunks")
         
         # Step 5: Connect to Milvus
         logger.info("Step 5: Connecting to Milvus")
@@ -636,19 +635,19 @@ def main():
             logger.error("Failed to connect to Milvus")
             return
         
-        # Step 6: Create sparse collection
-        logger.info("Step 6: Creating sparse collection")
-        if not milvus_manager.create_sparse_collection():
-            logger.error("Failed to create sparse collection")
+        # Step 6: Create collection with dense vectors
+        logger.info("Step 6: Creating collection with dense vectors")
+        if not milvus_manager.create_collection():
+            logger.error("Failed to create collection")
             return
         
         # Step 7: Upsert data into Milvus
-        logger.info("Step 7: Upserting sparse data into Milvus")
-        if not milvus_manager.upsert_sparse_data(chunks_with_embeddings):
-            logger.error("Failed to upsert sparse data")
+        logger.info("Step 7: Upserting data with dense embeddings into Milvus")
+        if not milvus_manager.upsert_data(chunks_with_embeddings):
+            logger.error("Failed to upsert data")
             return
         
-        logger.info("Sparse vector data loading completed successfully!")
+        logger.info("Data loading completed successfully with dense vectors!")
         logger.info(f"Final statistics: {strategy_stats}")
         
     except Exception as e:

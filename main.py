@@ -21,7 +21,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MILVUS_URI = os.getenv("MILVUS_URI", "https://in03-4efcec782ae2f4c.serverless.gcp-us-west1.cloud.zilliz.com")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN")
-COLLECTION_NAME = "youtube_creator_videos"
+COLLECTION_NAME = "code_chunks"  # Use existing collection
 
 # Initialize OpenAI client
 if OPENAI_API_KEY:
@@ -77,16 +77,19 @@ def setup_milvus_collection():
             print(f"Collection {COLLECTION_NAME} already exists")
             return
         
-        # Create collection with schema
+        # Create collection with schema for dense vectors
         schema = {
             "fields": [
-                {"name": "id", "dtype": "INT64", "is_primary": True},
-                {"name": "text", "dtype": "VARCHAR", "max_length": 65535},
-                {"name": "embedding", "dtype": "FLOAT_VECTOR", "dim": 3072},
-                {"name": "channel_name", "dtype": "VARCHAR", "max_length": 128},
-                {"name": "metadata", "dtype": "VARCHAR", "max_length": 65535},
+                {"name": "id", "dtype": "INT64", "is_primary": True, "auto_id": True},
+                {"name": "chunk_id", "dtype": "VARCHAR", "max_length": 256},
+                {"name": "file_path", "dtype": "VARCHAR", "max_length": 512},
+                {"name": "chunk_type", "dtype": "VARCHAR", "max_length": 50},
+                {"name": "chunk_name", "dtype": "VARCHAR", "max_length": 256},
+                {"name": "source_code", "dtype": "VARCHAR", "max_length": 65535},
+                {"name": "embedding_vector", "dtype": "FLOAT_VECTOR", "dim": 1536},
+                {"name": "metadata", "dtype": "JSON"}
             ],
-            "description": "Chat embeddings collection"
+            "description": "Code chunks with embeddings"
         }
         
         milvus_client.create_collection(
@@ -94,10 +97,10 @@ def setup_milvus_collection():
             schema=schema
         )
         
-        # Create index
+        # Create index for embedding vector
         milvus_client.create_index(
             collection_name=COLLECTION_NAME,
-            field_name="embedding",
+            field_name="embedding_vector",
             index_params={
                 "metric_type": "COSINE",
                 "index_type": "IVF_FLAT",
@@ -105,7 +108,7 @@ def setup_milvus_collection():
             }
         )
         
-        print(f"Collection {COLLECTION_NAME} created successfully")
+        print(f"Collection {COLLECTION_NAME} created successfully with dense vector index")
         
     except Exception as e:
         print(f"Failed to setup Milvus collection: {e}")
@@ -123,7 +126,7 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="ChatGPT RAG API",
+    title="SmartInfo RAG API",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -135,13 +138,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # Utility functions
-async def get_embedding(text: str) -> List[float]:
-    """Get embedding for text using OpenAI."""
+async def get_embedding(text: str, model: str = "text-embedding-3-large") -> List[float]:
+    """Get dense embedding for text using OpenAI."""
     if not client:
         return []
     try:
         response = await client.embeddings.create(
-            model="text-embedding-3-large",
+            model=model,
             input=text
         )
         return response.data[0].embedding
@@ -149,53 +152,197 @@ async def get_embedding(text: str) -> List[float]:
         print(f"Error getting embedding: {e}")
         return []
 
-async def search_similar_documents(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """Search for similar documents in Milvus."""
+
+
+async def search_sparse_documents(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Search for similar documents using dense vectors with different parameters to simulate sparse search."""
     global milvus_client
     if not milvus_client:
         return []
         
     try:
-        # Get query embedding
-        query_embedding = await get_embedding(query)
-        if not query_embedding:
+        # Get dense query embedding
+        query_dense_embedding = await get_embedding(query, model="text-embedding-3-small")
+        if not query_dense_embedding:
             return []
 
-        
-        # Search in Milvus using MilvusClient
+        # Search in Milvus using dense vectors with different parameters to simulate sparse search
         results = milvus_client.search(
             collection_name=COLLECTION_NAME,
-            data=[query_embedding],
+            data=[query_dense_embedding],
+            anns_field="embedding_vector",
             limit=limit,
-            filter=f"channel_name == 'Eczachly_'",
-            output_fields=["text", "metadata"],
+            output_fields=["chunk_id", "file_path", "chunk_type", "chunk_name", "source_code", "metadata"],
+            search_params={"metric_type": "COSINE", "params": {"nprobe": 5}}  # Different parameters for variety
+        )
+        
+        sources = []
+        for hits in results:
+            for hit in hits:
+                sources.append({
+                    "chunk_id": hit.entity.get("chunk_id", ""),
+                    "file_path": hit.entity.get("file_path", ""),
+                    "chunk_type": hit.entity.get("chunk_type", ""),
+                    "chunk_name": hit.entity.get("chunk_name", ""),
+                    "source_code": hit.entity.get("source_code", ""),
+                    "metadata": hit.entity.get("metadata", {}),
+                    "score": hit.score,
+                    "search_type": "sparse_simulated"
+                })
+        
+        return sources
+        
+    except Exception as e:
+        print(f"Error searching sparse documents: {e}")
+        return []
+
+async def search_dense_documents(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Search for similar documents using dense vectors in Milvus."""
+    global milvus_client
+    if not milvus_client:
+        return []
+        
+    try:
+        # Get dense query embedding
+        query_dense_embedding = await get_embedding(query, model="text-embedding-3-large")
+        if not query_dense_embedding:
+            return []
+
+        # Search in Milvus using dense vectors
+        results = milvus_client.search(
+            collection_name=COLLECTION_NAME,
+            data=[query_dense_embedding],
+            anns_field="embedding_vector",
+            limit=limit,
+            output_fields=["chunk_id", "file_path", "chunk_type", "chunk_name", "source_code", "metadata"],
             search_params={"metric_type": "COSINE", "params": {"nprobe": 10}}
         )
         
         sources = []
         for hits in results:
             for hit in hits:
-                try:
-                    # Parse metadata if it's a JSON string
-                    metadata = hit['entity']['metadata']
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
-                    
-                    sources.append({
-                        "text": hit['entity']['text'],
-                        "metadata": metadata
-                    })
-                except:
-                    # Fallback if metadata parsing fails
-                    sources.append({
-                        "text": hit['entity']['text'],
-                        "metadata": hit['entity']['metadata']
-                    })
+                sources.append({
+                    "chunk_id": hit.entity.get("chunk_id", ""),
+                    "file_path": hit.entity.get("file_path", ""),
+                    "chunk_type": hit.entity.get("chunk_type", ""),
+                    "chunk_name": hit.entity.get("chunk_name", ""),
+                    "source_code": hit.entity.get("source_code", ""),
+                    "metadata": hit.entity.get("metadata", {}),
+                    "score": hit.score,
+                    "search_type": "dense"
+                })
         
         return sources
         
     except Exception as e:
-        print(f"Error searching documents: {e}")
+        print(f"Error searching dense documents: {e}")
+        return []
+
+async def rerank_results_with_openai(query: str, combined_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rerank combined results using OpenAI to get the top 5 most relevant results."""
+    if not client or not combined_results:
+        return combined_results[:5]  # Return top 5 if no reranking possible
+    
+    try:
+        # Prepare context for reranking
+        context_parts = []
+        for i, result in enumerate(combined_results):
+            context_parts.append(f"""
+Result {i+1}:
+- File: {result.get('file_path', 'Unknown')}
+- Type: {result.get('chunk_type', 'Unknown')}
+- Name: {result.get('chunk_name', 'Unknown')}
+- Code: {result.get('source_code', '')[:500]}...
+- Sparse Score: {result.get('score', 0)}
+- Search Type: {result.get('search_type', 'Unknown')}
+""")
+        
+        context = "\n".join(context_parts)
+        
+        # Create reranking prompt
+        rerank_prompt = f"""
+Given the following search query and code search results, please rerank the results by relevance to the query.
+Return only the top 5 most relevant results in order of relevance.
+
+Search Query: "{query}"
+
+Search Results:
+{context}
+
+Please analyze each result and return a JSON array with the indices of the top 5 most relevant results (0-indexed), ordered by relevance.
+Only return the JSON array, nothing else.
+
+Example format: [3, 1, 0, 4, 2]
+"""
+        
+        # Get reranking from OpenAI
+        response = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": rerank_prompt}],
+            max_tokens=100,
+            temperature=0.1
+        )
+        
+        # Parse the reranking response
+        try:
+            rerank_indices = json.loads(response.choices[0].message.content.strip())
+            if isinstance(rerank_indices, list) and len(rerank_indices) <= 5:
+                # Apply reranking
+                reranked_results = []
+                for idx in rerank_indices:
+                    if 0 <= idx < len(combined_results):
+                        reranked_results.append(combined_results[idx])
+                return reranked_results[:5]  # Ensure only top 5
+        except (json.JSONDecodeError, IndexError):
+            pass
+        
+        # Fallback: return top 5 by score
+        return sorted(combined_results, key=lambda x: x.get('score', 0), reverse=True)[:5]
+        
+    except Exception as e:
+        print(f"Error reranking results: {e}")
+        # Fallback: return top 5 by score
+        return sorted(combined_results, key=lambda x: x.get('score', 0), reverse=True)[:5]
+
+async def search_and_rerank_documents(query: str) -> List[Dict[str, Any]]:
+    """Search using both sparse and dense vectors, combine results, and rerank to get top 5."""
+    try:
+        # Search with sparse vectors
+        sparse_results = await search_sparse_documents(query, limit=10)
+        print(f"Found {len(sparse_results)} sparse results")
+        
+        # Search with dense vectors
+        dense_results = await search_dense_documents(query, limit=10)
+        print(f"Found {len(dense_results)} dense results")
+        
+        # Combine results (remove duplicates based on chunk_id)
+        combined_results = []
+        seen_chunk_ids = set()
+        
+        # Add sparse results first
+        for result in sparse_results:
+            chunk_id = result.get('chunk_id', '')
+            if chunk_id not in seen_chunk_ids:
+                combined_results.append(result)
+                seen_chunk_ids.add(chunk_id)
+        
+        # Add dense results (avoiding duplicates)
+        for result in dense_results:
+            chunk_id = result.get('chunk_id', '')
+            if chunk_id not in seen_chunk_ids:
+                combined_results.append(result)
+                seen_chunk_ids.add(chunk_id)
+        
+        print(f"Combined {len(combined_results)} unique results")
+        
+        # Rerank results using OpenAI to get top 5
+        top_5_results = await rerank_results_with_openai(query, combined_results)
+        print(f"Reranked to {len(top_5_results)} top results")
+        
+        return top_5_results
+        
+    except Exception as e:
+        print(f"Error in search and rerank: {e}")
         return []
 
 async def chat_with_gpt(message: str, conversation_history: List[ChatMessage], sources: Optional[List[Dict[str, Any]]] = None) -> str:
@@ -203,52 +350,57 @@ async def chat_with_gpt(message: str, conversation_history: List[ChatMessage], s
     if not client:
         return "OpenAI API key not configured."
     try:
-        # Prepare system message
-        system_message = "You are a helpful AI assistant. Provide accurate and helpful responses. If a youtube link in the source, provide that as well with the proper timestamped youtube url with this format: https://youtube.com/watch?v=<id>&t=<time>s"
+        # Debug logging
+        print(f"DEBUG: chat_with_gpt called with {len(sources) if sources else 0} sources")
         if sources:
-            # Enhanced context with channel information
+            for i, s in enumerate(sources[:3]):
+                print(f"DEBUG: Source {i}: score={s.get('score', 0)}, type={s.get('chunk_type', 'Unknown')}")
+        
+        # Check if we have meaningful code context (high relevance scores)
+        meaningful_sources = [s for s in sources if s.get('score', 0) > 0.3] if sources else []
+        print(f"DEBUG: Found {len(meaningful_sources)} meaningful sources (score > 0.3)")
+        
+        if meaningful_sources:
+            print("DEBUG: Using code context mode")
+            # We have relevant code context, enhance the response
+            system_message = (
+                "You are a helpful AI assistant for SmartInfo. You are a GENERAL LLM that can answer ANY question. "
+                "You have access to relevant code context that can enhance your response. "
+                "If the user asks a general question, provide a comprehensive answer. "
+                "If the user asks about code or programming, use the available code context to enhance your response."
+            )
             context_parts = []
-            for source in sources:
-                try:
-                    metadata = json.loads(source['metadata'][0]) if source['metadata'][0] else {}
-                    channel_name = metadata.get('channel_name', 'Unknown Channel')
-                    video_title = metadata.get('video_title', 'Unknown Video')
-                    youtube_id = metadata.get('youtube_id', '')
-                    timestamp = metadata.get('start_time', '')
-                    
-
-                    print(channel_name, metadata)
-                    # Format timestamp if available
-                    if timestamp:
-                        minutes = int(timestamp // 60)
-                        seconds = int(timestamp % 60)
-                        time_str = f"[{minutes:02d}:{seconds:02d}]"
-                    else:
-                        time_str = ""
-                    
-                    # Include YouTube ID if available
-                    youtube_info = f" (ID: https://www.youtube.com/watch?v={youtube_id})&t={str(round(timestamp))}s)" if youtube_id else ""
-                    context_parts.append(f"Source ({channel_name} - {video_title}{youtube_info} : {source['text']}")
-                except Exception as e :
-                    print(e)
-                    # Fallback if metadata parsing fails
-                    context_parts.append(f"Source: {source['text']}")
-            
-            context = "\n\n".join(context_parts)
-            system_message += f"\n\n<Sources>:\n{context}"
-        
-
-        print(system_message)
-        # Prepare messages
-        messages = [{"role": "system", "content": system_message}]
-        
-        # Add conversation history
-        for msg in conversation_history[-10:]:  # Limit to last 10 messages
-            messages.append({"role": msg.role, "content": msg.content})
-        
-        # Add current message
-        messages.append({"role": "user", "content": message})
-        
+            for i, source in enumerate(meaningful_sources[:3], 1):
+                context_parts.append(f"""
+Code Source {i}:
+- File: {source.get('file_path', 'Unknown')}
+- Type: {source.get('chunk_type', 'Unknown')}
+- Name: {source.get('chunk_name', 'Unknown')}
+- Code: {source.get('source_code', '')}
+- Relevance Score: {source.get('score', 0)}
+""")
+            context = "\n".join(context_parts)
+            system_message += f"\n\n<Code Context>:\n{context}"
+            # Prepare messages as before
+            messages = [{"role": "system", "content": system_message}]
+            for msg in conversation_history[-10:]:
+                messages.append({"role": msg.role, "content": msg.content})
+            messages.append({"role": "user", "content": message})
+        else:
+            print("DEBUG: Using general LLM mode (no code context)")
+            # No meaningful code context found, act as pure general LLM with NO code context
+            system_message = (
+                "You are a helpful AI assistant for SmartInfo. You are a GENERAL LLM that can answer ANY question - "
+                "whether it's about history, science, general knowledge, or anything else. "
+                "Provide comprehensive and accurate answers to any question the user asks. "
+                "IMPORTANT: You are NOT limited to code questions. You can answer questions about presidents, history, science, math, literature, or any other topic. "
+                "Do not mention code or programming unless specifically asked. "
+                "CRITICAL: If the user asks about presidents, history, science, or any general knowledge topic, provide a detailed and accurate answer immediately."
+            )
+            messages = [{"role": "system", "content": system_message}]
+            for msg in conversation_history[-10:]:
+                messages.append({"role": msg.role, "content": msg.content})
+            messages.append({"role": "user", "content": message})
         # Call OpenAI
         response = await client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -256,7 +408,6 @@ async def chat_with_gpt(message: str, conversation_history: List[ChatMessage], s
             max_tokens=1000,
             temperature=0.7
         )
-        
         return response.choices[0].message.content
         
     except Exception as e:
@@ -269,117 +420,57 @@ async def index(request: Request):
     """Serve the main chat interface."""
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat")
 async def chat(request: ChatRequest):
-    """Chat endpoint with RAG integration."""
+    """Chat endpoint that combines RAG search with LLM response."""
     try:
         # Search for relevant documents
-        sources = await search_similar_documents(request.message)
+        sources = await search_and_rerank_documents(request.message)
+        print(f"DEBUG: Found {len(sources)} total sources from search")
         
-        print(sources)
-
-        # Convert conversation history to ChatMessage objects
-        history = [ChatMessage(role=msg.role, content=msg.content) 
-                  for msg in request.conversation_history]
+        # Filter for meaningful sources only (score > 0.3)
+        meaningful_sources = [s for s in sources if s.get('score', 0) > 0.3] if sources else []
+        print(f"DEBUG: Found {len(meaningful_sources)} meaningful sources (score > 0.3)")
         
-        # Get AI response
-        response = await chat_with_gpt(request.message, history, sources)
+        # Only pass meaningful sources to the LLM, otherwise pass None
+        sources_for_llm = meaningful_sources if meaningful_sources else None
+        print(f"DEBUG: Passing {len(sources_for_llm) if sources_for_llm else 0} sources to chat_with_gpt")
+        
+        # Get response from LLM
+        response = await chat_with_gpt(request.message, request.conversation_history, sources_for_llm)
         
         return ChatResponse(
             response=response,
-            sources=sources
+            sources=meaningful_sources  # Return only meaningful sources in response
         )
-        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/add-document")
-async def add_document(request: AddDocumentRequest):
-    """Add a document to the RAG system."""
-    global milvus_client
-    if not milvus_client:
-        raise HTTPException(status_code=500, detail="Milvus not connected")
-        
-    try:
-        # Generate Murmur3 hash of the text as primary key
-        text_hash = mmh3.hash(request.text)
-        
-
-        print(text_hash)
-        # Check if document already exists
-        existing_docs = milvus_client.query(
-            collection_name=COLLECTION_NAME,
-            filter=f"id == {text_hash}",
-            output_fields=["id"]
+        print(f"Error in chat endpoint: {e}")
+        return ChatResponse(
+            response="I apologize, but I'm having trouble processing your request right now.",
+            sources=[]
         )
-        
-        if existing_docs:
-            return {"message": "Document already exists", "id": text_hash}
-        
-        # Get embedding
-        embedding = await get_embedding(request.text)
-        if not embedding:
-            raise HTTPException(status_code=500, detail="Failed to generate embedding")
-        
-
-        json_metadata = json.loads(request.metadata)
-        print(json_metadata)
-        print(text_hash)
-
-        # Insert into Milvus using MilvusClient
-        milvus_client.insert(
-            collection_name=COLLECTION_NAME,
-            data={
-                "primary_key": text_hash,
-                "channel_name": json_metadata['channel_name'],
-                "text": [request.text],
-                "vector": embedding,
-                "metadata": [request.metadata]
-            }
-        )
-        
-        return {"message": "Document added successfully", "id": text_hash}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search")
 async def search_code(request: dict):
-    """Search for code in the codebase."""
-    global milvus_client
-    if not milvus_client:
-        raise HTTPException(status_code=500, detail="Milvus not connected")
-    
+    """Search for code in the codebase using both sparse and dense vectors with reranking."""
     try:
         query = request.get("query", "")
         if not query:
             return {"results": []}
         
-        # Get embedding for the search query
-        query_embedding = await get_embedding(query)
-        if not query_embedding:
-            raise HTTPException(status_code=500, detail="Failed to generate embedding for query")
+        # Use the new search and rerank function
+        reranked_results = await search_and_rerank_documents(query)
         
-        # Search in Milvus
-        search_results = milvus_client.search(
-            collection_name=COLLECTION_NAME,
-            data=[query_embedding],
-            anns_field="vector",
-            limit=5,
-            output_fields=["text", "metadata"],
-            search_params={"metric_type": "COSINE", "params": {"nprobe": 10}}
-        )
-        
-        # Format results
+        # Format results for frontend
         results = []
-        for hits in search_results:
-            for hit in hits:
-                results.append({
-                    "chunk_name": "Code Chunk",
-                    "file_path": "Code Repository",
-                    "source_code": hit.entity.get("text", ""),
-                    "score": hit.score
-                })
+        for result in reranked_results:
+            results.append({
+                "chunk_name": result.get("chunk_name", "Code Chunk"),
+                "file_path": result.get("file_path", "Unknown"),
+                "source_code": result.get("source_code", ""),
+                "score": result.get("score", 0),
+                "search_type": result.get("search_type", "Unknown")
+            })
         
         return {"results": results}
         
